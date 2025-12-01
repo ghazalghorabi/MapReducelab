@@ -118,9 +118,9 @@ func CallExample() {
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("tcp", "172.20.10.5:1234")
+	//sockname := coordinatorSock()
+	//c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
@@ -153,7 +153,7 @@ func doMapTask(mapf func(string, string) []KeyValue, filename string, taskID int
 		intermediateFileName := fmt.Sprintf("mr-%d-%d", taskID, i)
 		file, err := os.Create(intermediateFileName)
 		if err != nil {
-			continue
+			return err
 		}
 		intermediateFiles[i] = file
 		encoders[i] = json.NewEncoder(file)
@@ -185,7 +185,7 @@ func doReduceTask(reducef func(string, []string) string, taskID int, nMap int) e
 		intermediateFileName := fmt.Sprintf("mr-%d-%d", i, taskID)
 		file, err := os.Open(intermediateFileName)
 		if err != nil {
-			return err
+			continue
 		}
 		decoder := json.NewDecoder(file)
 		for {
