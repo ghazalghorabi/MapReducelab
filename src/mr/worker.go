@@ -24,7 +24,6 @@ type KeyValue struct {
 
 type WorkerRPC struct{}
 
-// RPC: allows coordinator to get file contents from worker
 func (w *WorkerRPC) GetFile(args *GetFileArgs, reply *GetFileReply) error {
 	data, err := os.ReadFile(args.File)
 	if err != nil {
@@ -33,9 +32,6 @@ func (w *WorkerRPC) GetFile(args *GetFileArgs, reply *GetFileReply) error {
 	reply.Data = data
 	return nil
 }
-
-// use ihash(key) % NReduce to choose the reduce
-// task number for each KeyValue emitted by Map.
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
