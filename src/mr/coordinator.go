@@ -11,16 +11,14 @@ import (
 	"time"
 )
 
-// a label to tell the coordinator the status of a task
 type TaskStatus int
 
 const (
-	Idle       TaskStatus = iota //no one has started on this task
-	InProgress                   //task is currently being worked on
-	Completed                    //task has been finished
+	Idle TaskStatus = iota
+	InProgress
+	Completed
 )
 
-// phase of the entire job
 type Phase int
 
 const (
@@ -30,31 +28,24 @@ const (
 )
 
 type Coordinator struct {
-	// Your definitions here.
-	mu sync.Mutex //prevents workers grabbing the same task,
-	// tasks getting overwritten
-	//state changes getting messed up
-	file            []string     //list of input files for map tasks
-	nReduce         int          //how many reduce tasks exist
-	mapTasks        []TaskStatus //status of each map task
-	reduceTasks     []TaskStatus //status of each reduce task
-	phase           Phase        //current phase of the whole job
-	nMap            int          //how many map tasks exist
+	mu              sync.Mutex
+	file            []string
+	nReduce         int
+	mapTasks        []TaskStatus
+	reduceTasks     []TaskStatus
+	phase           Phase
+	nMap            int
 	mapStartTime    []time.Time
 	reduceStartTime []time.Time
 
-	workers      map[int]string //map of worker IDs to their addresses
-	nextWorkerID int            //counter to assign unique IDs to workers
-	mapOwner     []int          //which worker is assigned to which map task
+	workers      map[int]string
+	nextWorkerID int
+	mapOwner     []int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-// RPC handler in the coordinator for worker to request a task
-// worker: "coordinator, do you have a task for me?"
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	//only one worker can be assigned a task at a time
-	//without this lock, multiple workers could get the same task
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -69,27 +60,25 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		}
 		//look through map tasks
 		for i, status := range c.mapTasks {
-			//if there is any task that hasn't been given to any worker
 			if status == Idle {
-				//a worker is now doing this task (updating coordinator memory)
 				c.mapTasks[i] = InProgress
 				c.mapOwner[i] = args.WorkerID
 				c.mapStartTime[i] = time.Now()
 				fmt.Printf("Assigning map task %d to worker %d\n", i, args.WorkerID)
 
-				//fill in reply to worker with task details
-				reply.TaskType = MapTask  //you have a map task
-				reply.File = c.file[i]    //the file you should read
-				reply.TaskID = i          //you are doing map task i
-				reply.NReduce = c.nReduce //you need to split your map output into this many reduce tasks
-				reply.NMap = len(c.file)  //total number of map tasks
+				reply.TaskType = MapTask
+				reply.File = c.file[i]
+				reply.TaskID = i
+				reply.NReduce = c.nReduce
+				reply.NMap = len(c.file)
 
-				return nil //done assigning task
+				return nil
 			}
 		}
-		reply.TaskType = WaitTask //no task for you right now, wait
+		reply.TaskType = WaitTask
 		return nil
 	}
+
 	//reduce phase
 	if c.phase == ReducePhase {
 		for i := range c.reduceStartTime {
@@ -100,34 +89,31 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				}
 			}
 		}
-		//look through reduce tasks
+
 		for i, status := range c.reduceTasks {
-			//if there is any task that hasn't been given to any worker
 			if status == Idle {
-				//a worker is now doing this task (updating coordinator memory)
 				c.reduceTasks[i] = InProgress
 				c.reduceStartTime[i] = time.Now()
 				fmt.Printf("Assigning reduce task %d to worker %d\n", i, args.WorkerID)
 
-				//fill in reply to worker with task details
-				reply.TaskType = ReduceTask //you have a reduce task
-				reply.TaskID = i            //you are doing reduce task i
-				reply.NReduce = c.nReduce   //total number of reduce tasks
-				reply.NMap = c.nMap         //total number of map tasks
+				reply.TaskType = ReduceTask
+				reply.TaskID = i
+				reply.NReduce = c.nReduce
+				reply.NMap = c.nMap
 				reply.Owners = append([]int{}, c.mapOwner...)
 
-				return nil //done assigning task
+				return nil
 			}
 		}
-		reply.TaskType = WaitTask //no task for you right now, wait
+		reply.TaskType = WaitTask
 		return nil
 	}
 	if c.phase == DonePhase {
-		reply.TaskType = ExitTask //job done, worker can exit
+		reply.TaskType = ExitTask
 		return nil
 	}
 	//if no tasks are idle, but some are in progress
-	reply.TaskType = WaitTask //no task for you right now, wait
+	reply.TaskType = WaitTask
 	return nil
 }
 
@@ -138,10 +124,8 @@ func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) e
 
 	//check if the reported task is a map task
 	if args.TaskType == MapTask {
-		//mark the reported map task as completed
 		c.mapTasks[args.TaskID] = Completed
 
-		//check if all map tasks are completed
 		allDone := true
 		for _, status := range c.mapTasks {
 			if status != Completed {
@@ -150,16 +134,13 @@ func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) e
 			}
 		}
 		if allDone && c.phase == MapPhase {
-			c.phase = ReducePhase //move to reduce phase
+			c.phase = ReducePhase
 			fmt.Println("All map tasks completed. Moving to Reduce Phase.")
 		}
 	}
-	//check if the reported task is a reduce task
 	if args.TaskType == ReduceTask {
-		//mark the reported reduce task as completed
 		c.reduceTasks[args.TaskID] = Completed
 
-		//check if all reduce tasks are completed
 		allDone := true
 		for _, status := range c.reduceTasks {
 			if status != Completed {
@@ -168,7 +149,7 @@ func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) e
 			}
 		}
 		if allDone && c.phase == ReducePhase {
-			c.phase = DonePhase //job is done
+			c.phase = DonePhase
 			fmt.Println("All reduce tasks completed. Job Done.")
 		}
 	}
@@ -194,7 +175,6 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
-// start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -228,9 +208,9 @@ func (c *Coordinator) RegisterWorker(args *RegisterArgs, reply *RegisterReply) e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	workerID := c.nextWorkerID              //assign unique ID to worker
-	c.workers[workerID] = args.WorkerAdress //store worker address
-	c.nextWorkerID++                        //increment for next worker
+	workerID := c.nextWorkerID
+	c.workers[workerID] = args.WorkerAdress
+	c.nextWorkerID++
 	reply.WorkerID = workerID
 
 	return nil
@@ -248,8 +228,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.file = files
 	c.nReduce = nReduce
 	c.nMap = len(files)
-	c.mapTasks = make([]TaskStatus, len(files)) //status of each map task in a list
-	c.reduceTasks = make([]TaskStatus, nReduce) //status of each reduce task in a list
+	c.mapTasks = make([]TaskStatus, len(files))
+	c.reduceTasks = make([]TaskStatus, nReduce)
 	c.mapStartTime = make([]time.Time, len(files))
 	c.reduceStartTime = make([]time.Time, nReduce)
 	c.phase = MapPhase

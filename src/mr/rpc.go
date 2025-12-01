@@ -8,8 +8,6 @@ import (
 //
 // RPC definitions.
 
-// tells worker what kind of task it has been assigned
-// what action to take
 type TaskType int
 
 const (
@@ -19,44 +17,34 @@ const (
 	ExitTask
 )
 
-// worker tells coordinator "im worker, give me a task"
-// empty request, because coordinotor already know what tasks exits
-// does not need any extra info from worker
 type RequestTaskArgs struct {
-	WorkerID int //ID of the worker requesting the task
+	WorkerID int
 }
 
-// coordinator's reply to worker
-// the action's details
-// all the info worker needs to perform the task
 type RequestTaskReply struct {
-	TaskType TaskType //type of task assigned
-	File     string   //which file to read
-	TaskID   int      //number of the task assigned
-	NMap     int      //number of map tasks
-	NReduce  int      //number of reduce tasks
-	Owners   []int    //which worker is assigned to which map task
+	TaskType TaskType
+	File     string
+	TaskID   int
+	NMap     int
+	NReduce  int
+	Owners   []int
 }
 
-// worker tells coordinator "im done with this task"
 type ReportTaskArgs struct {
-	TaskType TaskType //type of task being reported
-	TaskID   int      //number of the task being reported
+	TaskType TaskType
+	TaskID   int
 }
 
-// coordinator's reply to worker
 type ReportTaskReply struct {
-	WorkerID int //ID assigned to the worker
+	WorkerID int
 }
 
-// worker tells coordinator "im a new worker, registering myself"
 type RegisterArgs struct {
 	WorkerAdress string
 }
 
-// coordinator's reply to worker
 type RegisterReply struct {
-	WorkerID int //ID assigned to the worker
+	WorkerID int
 }
 
 type GetFileArgs struct {
