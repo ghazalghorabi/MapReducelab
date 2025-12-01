@@ -75,6 +75,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				c.mapTasks[i] = InProgress
 				c.mapOwner[i] = args.WorkerID
 				c.mapStartTime[i] = time.Now()
+				fmt.Printf("Assigning map task %d to worker %d\n", i, args.WorkerID)
 
 				//fill in reply to worker with task details
 				reply.TaskType = MapTask  //you have a map task
@@ -106,6 +107,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				//a worker is now doing this task (updating coordinator memory)
 				c.reduceTasks[i] = InProgress
 				c.reduceStartTime[i] = time.Now()
+				fmt.Printf("Assigning reduce task %d to worker %d\n", i, args.WorkerID)
 
 				//fill in reply to worker with task details
 				reply.TaskType = ReduceTask //you have a reduce task
