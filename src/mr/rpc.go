@@ -22,7 +22,9 @@ const (
 // worker tells coordinator "im worker, give me a task"
 // empty request, because coordinotor already know what tasks exits
 // does not need any extra info from worker
-type RequestTaskArgs struct{}
+type RequestTaskArgs struct {
+	WorkerID int //ID of the worker requesting the task
+}
 
 // coordinator's reply to worker
 // the action's details
@@ -33,6 +35,7 @@ type RequestTaskReply struct {
 	TaskID   int      //number of the task assigned
 	NMap     int      //number of map tasks
 	NReduce  int      //number of reduce tasks
+	Owners   []int    //which worker is assigned to which map task
 }
 
 // worker tells coordinator "im done with this task"
@@ -42,7 +45,34 @@ type ReportTaskArgs struct {
 }
 
 // coordinator's reply to worker
-type ReportTaskReply struct{}
+type ReportTaskReply struct {
+	WorkerID int //ID assigned to the worker
+}
+
+// worker tells coordinator "im a new worker, registering myself"
+type RegisterArgs struct {
+	WorkerAdress string
+}
+
+// coordinator's reply to worker
+type RegisterReply struct {
+	WorkerID int //ID assigned to the worker
+}
+
+type GetFileArgs struct {
+	File string
+}
+
+type GetFileReply struct {
+	Data []byte
+}
+type WorkerAddressArgs struct {
+	WorkerID int
+}
+
+type WorkerAddressReply struct {
+	WorkerAddress string
+}
 
 //
 // remember to capitalize all names.

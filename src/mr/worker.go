@@ -1,20 +1,37 @@
 package mr
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"log"
+	"net"
+	"net/http"
 	"net/rpc"
 	"os"
 	"sort"
 	"time"
 )
 
+var myID int
+
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type WorkerRPC struct{}
+
+// RPC: allows coordinator to get file contents from worker
+func (w *WorkerRPC) GetFile(args *GetFileArgs, reply *GetFileReply) error {
+	data, err := os.ReadFile(args.File)
+	if err != nil {
+		return err
+	}
+	reply.Data = data
+	return nil
 }
 
 // use ihash(key) % NReduce to choose the reduce
@@ -25,14 +42,34 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func workerServer(adress string) {
+	rpc.Register(new(WorkerRPC))
+	rpc.HandleHTTP()
+	l, e := net.Listen("tcp", adress)
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	go http.Serve(l, nil)
+}
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	workerID := -1
+	workerAdress := ":8001"
+	go workerServer(workerAdress)
+
+	args := RegisterArgs{
+		WorkerAdress: workerAdress,
+	}
+	reply := RegisterReply{}
+	call("Coordinator.RegisterWorker", &args, &reply)
+	workerID = reply.WorkerID
 
 	// Your worker implementation here.
 	for {
-		arg := RequestTaskArgs{}    //worker: im ready give a task
-		reply := RequestTaskReply{} //coordinator: here is your task with details
+		arg := RequestTaskArgs{WorkerID: workerID} //worker: im ready give a task
+		reply := RequestTaskReply{}                //coordinator: here is your task with details
 
 		//worker calls request task method in coordinator
 		//worker: here are my args, fill in reply with task details
@@ -61,7 +98,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case ReduceTask:
 			//do reduce task
 			fmt.Println("worker doing reduce task")
-			if err := doReduceTask(reducef, reply.TaskID, reply.NMap); err != nil {
+			if err := doReduceTask(reducef, reply.TaskID, reply.NMap, reply.Owners); err != nil {
 				fmt.Printf("doReduceTask failed: %v\n", err)
 			}
 			//after finishing the task, report to coordinator
@@ -118,11 +155,13 @@ func CallExample() {
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	c, err := rpc.DialHTTP("tcp", "172.20.10.5:1234")
+	coordinatorAddress := "172.20.10.5:1234"
+	c, err := rpc.DialHTTP("tcp", coordinatorAddress)
 	//sockname := coordinatorSock()
 	//c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		fmt.Println("Coordinator unreachable, assuming failure.")
+		return false
 	}
 	defer c.Close()
 
@@ -133,6 +172,17 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func callWorkerRPC(rpcname string, workerAddress string, args interface{}, reply interface{}) bool {
+	c, err := rpc.DialHTTP("tcp", workerAddress)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+
+	err = c.Call(rpcname, args, reply)
+	return err == nil
 }
 
 // running a map task
@@ -177,25 +227,34 @@ func doMapTask(mapf func(string, string) []KeyValue, filename string, taskID int
 }
 
 // running a reduce task
-func doReduceTask(reducef func(string, []string) string, taskID int, nMap int) error {
+func doReduceTask(reducef func(string, []string) string, taskID int, nMap int, owners []int) error {
 	intermediate := []KeyValue{}
 
 	// read intermediate files from all map tasks
 	for i := 0; i < nMap; i++ {
-		intermediateFileName := fmt.Sprintf("mr-%d-%d", i, taskID)
-		file, err := os.Open(intermediateFileName)
-		if err != nil {
+		ownerID := owners[i]
+		if ownerID == -1 {
+			continue //map task not completed yet
+		}
+		args := GetFileArgs{
+			File: fmt.Sprintf("mr-%d-%d", i, taskID),
+		}
+		fileReply := GetFileReply{}
+
+		workerAddress := getWorkerAddress(ownerID)
+		ok := callWorkerRPC("WorkerRPC.GetFile", workerAddress, &args, &fileReply)
+		if !ok {
 			continue
 		}
-		decoder := json.NewDecoder(file)
+
+		dec := json.NewDecoder(bytes.NewReader(fileReply.Data))
 		for {
 			var kv KeyValue
-			if err := decoder.Decode(&kv); err != nil {
+			if err := dec.Decode(&kv); err != nil {
 				break
 			}
 			intermediate = append(intermediate, kv)
 		}
-		file.Close()
 	}
 
 	// sort intermediate key-value pairs by key
@@ -228,4 +287,16 @@ func doReduceTask(reducef func(string, []string) string, taskID int, nMap int) e
 	}
 
 	return nil
+}
+
+func getWorkerAddress(workerID int) string {
+	args := WorkerAddressArgs{
+		WorkerID: workerID,
+	}
+	reply := WorkerAddressReply{}
+	call("Coordinator.GetWorkerAddress", &args, &reply)
+	if reply.WorkerAddress == "" {
+		fmt.Printf("Worker ID %d address not found\n", workerID)
+	}
+	return reply.WorkerAddress
 }

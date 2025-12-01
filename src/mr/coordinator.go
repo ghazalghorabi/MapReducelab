@@ -42,6 +42,10 @@ type Coordinator struct {
 	nMap            int          //how many map tasks exist
 	mapStartTime    []time.Time
 	reduceStartTime []time.Time
+
+	workers      map[int]string //map of worker IDs to their addresses
+	nextWorkerID int            //counter to assign unique IDs to workers
+	mapOwner     []int          //which worker is assigned to which map task
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -69,6 +73,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			if status == Idle {
 				//a worker is now doing this task (updating coordinator memory)
 				c.mapTasks[i] = InProgress
+				c.mapOwner[i] = args.WorkerID
 				c.mapStartTime[i] = time.Now()
 
 				//fill in reply to worker with task details
@@ -107,6 +112,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				reply.TaskID = i            //you are doing reduce task i
 				reply.NReduce = c.nReduce   //total number of reduce tasks
 				reply.NMap = c.nMap         //total number of map tasks
+				reply.Owners = append([]int{}, c.mapOwner...)
 
 				return nil //done assigning task
 			}
@@ -167,6 +173,17 @@ func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) e
 	return nil
 }
 
+func (c *Coordinator) GetWorkerAddress(args *WorkerAddressArgs, reply *WorkerAddressReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	reply.WorkerAddress = c.workers[args.WorkerID]
+	if reply.WorkerAddress == "" {
+		return fmt.Errorf("worker ID %d not found", args.WorkerID)
+	}
+	return nil
+}
+
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
@@ -204,13 +221,28 @@ func (c *Coordinator) Done() bool {
 	return ret
 }
 
+// RPC handler in the coordinator for worker registration
+func (c *Coordinator) RegisterWorker(args *RegisterArgs, reply *RegisterReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	workerID := c.nextWorkerID              //assign unique ID to worker
+	c.workers[workerID] = args.WorkerAdress //store worker address
+	c.nextWorkerID++                        //increment for next worker
+	reply.WorkerID = workerID
+
+	return nil
+}
+
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
-	// Your code here.
+	c.workers = make(map[int]string)
+	c.nextWorkerID = 0
+
 	c.file = files
 	c.nReduce = nReduce
 	c.nMap = len(files)
@@ -219,6 +251,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.mapStartTime = make([]time.Time, len(files))
 	c.reduceStartTime = make([]time.Time, nReduce)
 	c.phase = MapPhase
+
+	c.mapOwner = make([]int, len(files))
+	for i := range c.mapOwner {
+		c.mapOwner[i] = -1 //no worker assigned yet
+	}
 
 	c.server()
 	return &c
