@@ -11,14 +11,11 @@ import (
 	"time"
 )
 
-// Map functions return a slice of KeyValue.
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-// use ihash(key) % NReduce to choose the reduce
-// task number for each KeyValue emitted by Map.
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -31,54 +28,44 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	for {
-		arg := RequestTaskArgs{}    //worker: im ready give a task
-		reply := RequestTaskReply{} //coordinator: here is your task with details
+		arg := RequestTaskArgs{}
+		reply := RequestTaskReply{}
 
-		//worker calls request task method in coordinator
-		//worker: here are my args, fill in reply with task details
 		ok := call("Coordinator.RequestTask", &arg, &reply)
 		if !ok {
-			return //coordinator died -> worker exits
+			return
 		}
-		//debugging info: shows that coordinator told worker what to do
 		fmt.Println("worker received TaskType: ", reply.TaskType)
 		switch reply.TaskType {
 		case MapTask:
-			//do map task
 			fmt.Println("worker doing map task", reply.TaskID, "on file", reply.File)
 			if err := doMapTask(mapf, reply.File, reply.TaskID, reply.NReduce); err != nil {
 				fmt.Printf("doMapTask failed: %v\n", err)
 			}
-			//after finishing the task, report to coordinator
 			doneArgs := ReportTaskArgs{
 				TaskType: MapTask,
 				TaskID:   reply.TaskID,
 			}
 			doneReply := ReportTaskReply{}
-			//worker tells coordinator: im done with this task
 			call("Coordinator.ReportTask", &doneArgs, &doneReply)
 
 		case ReduceTask:
-			//do reduce task
 			fmt.Println("worker doing reduce task")
 			if err := doReduceTask(reducef, reply.TaskID, reply.NMap); err != nil {
 				fmt.Printf("doReduceTask failed: %v\n", err)
 			}
-			//after finishing the task, report to coordinator
 			doneArgs := ReportTaskArgs{
 				TaskType: ReduceTask,
 				TaskID:   reply.TaskID,
 			}
 			doneReply := ReportTaskReply{}
-			//worker tells coordinator: im done with this task
 			call("Coordinator.ReportTask", &doneArgs, &doneReply)
 
 		case WaitTask:
-			//dont have a task, wait and ask again
-			time.Sleep(300 * time.Millisecond) //wait a bit before asking again
+			time.Sleep(300 * time.Millisecond)
 			continue
 		case ExitTask:
-			return //job done, worker exits
+			return
 		}
 	}
 
@@ -135,7 +122,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	return false
 }
 
-// running a map task
 func doMapTask(mapf func(string, string) []KeyValue, filename string, taskID int, nReduce int) error {
 	// read file contents
 	content, err := os.ReadFile(filename)
