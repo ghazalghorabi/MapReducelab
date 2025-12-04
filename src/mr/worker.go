@@ -1,9 +1,13 @@
 package mr
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"log"
+	"net"
+	"net/http"
 	"net/rpc"
 	"os"
 	"sort"
@@ -14,6 +18,36 @@ import (
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type WorkerRPC struct{} // new type called WorkerRPC; we need this so the RPC system works with methods on a type. This is the object that exposes RPC functions for this worker. We want to define RPC functions that other workers can call on this worker
+
+// when another worker asks GetFile("mr-X-Y") this method read that file from local disk and sends back its bytes in reply.Data
+func (w *WorkerRPC) GetFile(args *GetFileArgs, reply *GetFileReply) error { // w*WorkerRPC this makes it a method on the WorkerRPC type, w is the reciever, GetfFile--> name of the RPC method and args *GetFileArgs is the imput from the caller (another wprker)
+	//reply *GetFileReply: the output we send back, GetFileReply has a field Data[] byte (the file contents)
+	//this method will be called remotely as: "WorkerRPC.GetFile" by another worker
+	data, err := os.ReadFile(args.File) // os.ReadFile: reads the entire file from disk into memory, args.Fule is the filename the caller requested: (eg: mr-0-1), data will be a []byte containing the file's contents. This line basically reads the requested file from the local disk
+	if err != nil {                     //check if something went wrong when reading the file
+		return err //return error to the caller
+	}
+	reply.Data = data // if no error happend, we reach this line and store the file's bytes(data) into the reply struct. reply.Data is what the caller will recieve
+	return nil        // nil meaning no error, rpc completes succesfully
+}
+
+// this function starts a small RPC server on the worker so that other workers can call WorkerRPC.GetFile to download intermediate files
+func workerServer(adress string) { //function takes one parameter named adress, this is the TCP address to listen on, Ex: ':8001', "localhost: 9000"
+	rpc.Register(new(WorkerRPC)) //new(WorkerRPC) creates a pointer to a WorkerRPC struct, rpc.Register(...) tells Go's RPC system: expose all exported methods of this object as RPC methods. We previosuly defined: func (w *WorkerRPC) GetFile(...),
+	// Because of rpc.Register(new(WorkerRPC)), other processes can now call: "WorkerRPC.GetFile" on this worker via RPC: This line hooks up GetFile method on the RPC system
+	rpc.HandleHTTP()                  // sets up RPC to be served over HTTP, it configures default HTTP server so that RPC requests are handled under the hood. So combining this with network listening ==> HTTP + RPC over TCP
+	l, e := net.Listen("tcp", adress) // Opens a TCP listening socket on the given address. Address might be: "8801". which means listen on port "8801" on all local interfaces.
+	//l= listener object, e= any error that occured
+	if e != nil { //check if there was an error in net.Listen
+		log.Fatal("listen error:", e)
+	}
+	go http.Serve(l, nil) // starts an HTTP server that: accepts connections on the listener: l, routes requests to handlers (including the RPC handler set up by rpc.HandleHTTP())
+	// go runs in a seperate go routine so the server runs in the background, the worker can keep doing other things (like requesting tasks and running map/reduce code)
+	//menas basically in the background, handle incoming HTTP+RPC connections on this address
+
 }
 
 // use ihash(key) % NReduce to choose the reduce
@@ -36,11 +70,24 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) { // this defines the worker function, it takes two arguments
 	// mapf--> a function the worker can call for map tasks
 	//reducef --> a function the worker can call for reduce tasks
-	//these functions are loaded from the.so plug in
+	//these functions are loaded from the.so plug
+	workerID := -1          // create a local variable workerID, set it to -1 to indicate that you dont have an ID yet, after we register with the coordinator, this will be set to 0,1,2 etc
+	workerAdress := ":8001" // this is the tcp address where this worker will listen for RPC calls, ":8001" means listen on port 8001 on this machine
+
+	//start worker RPC server
+	go workerServer(workerAdress) //Starts an RPC server on this worker listening on ":8001", it also exposes methods like WorkerRPC.GetFile, go runs it in a goroutine so the server runs in the background and the worker can continue doing its normal work
+
+	//register with coordinator
+	args := RegisterArgs{WorkerAdress: workerAdress} // we create a RegisterArgs struct, WorkerAddress: workerAdress means: tell the coordinator i am listening at ":8001"
+	reply := RegisterReply{}                         // Create an empty RegisterReply struct, the coordinator will fill this with the assigned worker ID
+
+	call("Coordinator.RegisterWorker", &args, &reply) // make an RPC call to coordinator.RegisterWorker, send the address in args and the coordinator saves this address ij its workers map and assigns the worker new worker ID.
+	workerID = reply.WorkerID                         // write that workerID into reply.WorkerID, store the returned WorkerID in the workerID variable
+	//reason we use tgis: later when we require a task, we send this workerID and the coordinator uses workerID to update mapOwner[taskID]. That's how the system know which worker created which intermediate files
 
 	for { //Keep trying to get work from the coordinator
-		arg := RequestTaskArgs{}    //arg -> the arguments we send to the coordinator when asking for a task; type RequestTaskArgs
-		reply := RequestTaskReply{} // Will hold the coordinators answer; type RequestTaskReply; it will contain things like: taskType, File, TaskID etc.
+		arg := RequestTaskArgs{WorkerID: workerID} //arg -> the arguments we send to the coordinator when asking for a task; type RequestTaskArgs, tell coordinator which workerID so the coordinator knows whcih worker is asking for work so it can set mapOwner[mapTaskID] = workerID when it gives a map task
+		reply := RequestTaskReply{}                // Will hold the coordinators answer; type RequestTaskReply; it will contain things like: taskType, File, TaskID etc.
 
 		ok := call("Coordinator.RequestTask", &arg, &reply) //The RPC call, it tries to call the function Coordinator.RequestTask method on the coordinator object, &arg--> send a pointer to our request arguemnts, &reply --> the coordinator writes its response into this struct
 		//ok is a boolean: true if the RPC call succeeded and false if it failed (eg. coordinator exited/crashed)
@@ -68,8 +115,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		case ReduceTask:
 			fmt.Println("worker doing reduce task")
-			if err := runReduceTask(reducef, reply.TaskID, reply.NMap); err != nil { // call doReduceTask with reducef (the users reduce function), reply.TaskID (which reduce task ID to run), reply.NMap (total number of map tasks)
-				fmt.Printf("doReduceTask failed: %v\n", err) // if doReuceTask returns an error, inform user
+			if err := runReduceTask(reducef, reply.TaskID, reply.NMap, reply.Owners); err != nil { // call doReduceTask with reducef (the users reduce function), reply.TaskID (which reduce task ID to run), reply.NMap (total number of map tasks)
+				fmt.Printf("runReduceTask failed: %v\n", err) // if doReuceTask returns an error, inform user
 			}
 
 			doneArgs := ReportTaskArgs{
@@ -202,6 +249,75 @@ func runReduceTask(reducef func(string, []string) string, reduceID int, nMap int
 	return nil
 }
 
+// TODO:
+func doReduceTask(reducef func(string, []string) string, taskID int, nMap int, owners []int) error {
+	intermediate := []KeyValue{}
+
+	// read intermediate files from all map tasks
+	for i := 0; i < nMap; i++ {
+		ownerID := owners[i]
+		if ownerID == -1 {
+			continue // map task not completed yet (shouldn’t normally happen if coordinator transitions correctly)
+		}
+
+		args := GetFileArgs{
+			File: fmt.Sprintf("mr-%d-%d", i, taskID),
+		}
+		fileReply := GetFileReply{}
+
+		workerAddress := getWorkerAddress(ownerID)
+		ok := callWorkerRPC("WorkerRPC.GetFile", workerAddress, &args, &fileReply)
+		if !ok {
+			// failed to reach owning worker; skip or maybe retry
+			continue
+		}
+
+		dec := json.NewDecoder(bytes.NewReader(fileReply.Data))
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+	}
+
+	// sort by key
+	sort.Slice(intermediate, func(i, j int) bool {
+		return intermediate[i].Key < intermediate[j].Key
+	})
+
+	// create output file mr-out-taskID
+	outputFileName := fmt.Sprintf("mr-out-%d", taskID)
+	outputFile, err := os.Create(outputFileName)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+
+	// run reducef on each key group and write output
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+
+		reducedValue := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(outputFile, "%v %v\n", intermediate[i].Key, reducedValue)
+
+		i = j
+	}
+	return nil
+}
+
+//TODO
+
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
@@ -233,10 +349,8 @@ func CallExample() {
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool { //worker connects to the socket and sends RPC calls
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-
 	coordinatorAddress := "172.20.10.5:1234"          //network address of the coordinator, connect to IP 172.20.10.5 (the coordinator machine) on port 1234 (where the server() is listening)
-	c, err := rpc.DialHTTP("tcp", coordinatorAddress) //this tries to open a connection to the coordinators RPC server, we use TCP as the protocol and coordinatorAddress → host:port to connect to
+	c, err := rpc.DialHTTP("tcp", coordinatorAddress) //this tries to open a connection to the coordinators RPC server, we use TCP as the protocol and coordinatorAddress → host:port to connect to, so it basivally opens a TCP connection to the coordinatorAddress. It expects an HTTP + RPC server on the other side (which Coordinator.server() started). c is the RPC client connection
 	if err != nil {                                   // on success c is an RPC client object
 		fmt.Println("Coordinator unreachable, assuming failure.")
 		return false //return false from call
@@ -250,4 +364,24 @@ func call(rpcname string, args interface{}, reply interface{}) bool { //worker c
 
 	fmt.Println(err) // something went wrong while calling the RPC
 	return false
+}
+
+func callWorkerRPC(rpcname string, workerAddress string, args interface{}, reply interface{}) bool {
+	c, err := rpc.DialHTTP("tcp", workerAddress)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	err = c.Call(rpcname, args, reply)
+	return err == nil
+}
+
+func getWorkerAddress(workerID int) string {
+	args := WorkerAddressArgs{WorkerID: workerID}
+	reply := WorkerAddressReply{}
+	call("Coordinator.GetWorkerAddress", &args, &reply)
+	if reply.WorkerAddress == "" {
+		fmt.Printf("Worker ID %d address not found\n", workerID)
+	}
+	return reply.WorkerAddress
 }
