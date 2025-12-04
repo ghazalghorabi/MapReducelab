@@ -190,17 +190,19 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 // start a thread that listens for RPCs from worker.go
-func (c *Coordinator) server() {
+func (c *Coordinator) server() { //defines a method called server that eblongs to the coordinator type 
 	rpc.Register(c) //register coordinator for rpc
-	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname) //a communication way for the coordinator and worker to communicate with each other (via unix domain sockets)
+	rpc.HandleHTTP() //connects RPC system with the HTTP server, it sets up internal HTTP handlers so that incoming HTTP requests to special paths (like /debug/rpc, /rpc) can be treated as RPC calls
+	l, e := net.Listen("tcp", ":1234") // Listen on TCP so workers on other machines can reach this 
+	//If your machine’s IP is 172.20.10.5, this means it listens on 172.20.10.5:1234.
+	// l is a listener object you can pass to http.Serve, e = error 
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	go http.Serve(l, nil) // Serve RPC requests over the socket
+	go http.Serve(l, nil) // start serving HTTP requests that arrive on listener l, rpc.HandleHTTP() registered the RPC endpoints
+	// this connects socket -> http layer -> rpc handler 
+	// run this http.Serve in a new gproutine (bakground thread), after this line the coordinator is listening for RPC calls on TCP port 1234
+
 }
 
 // create a Coordinator.
@@ -208,6 +210,11 @@ func (c *Coordinator) server() {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator { //here we pass all the filenames
 	c := Coordinator{} //creates an empty coordinator struct, c is the coordinator variable
+
+	//initialize worker registry
+	c.workers = make(map[int]string) // creates an empty map from int to string. WorkerID -> "ip:port" 
+	c.nextWorkerID = 0 // start the worker ID counter at 0
+
 
 	//initialize fields
 	c.files = files     // stores the list of input filenames into the coordinator
@@ -229,7 +236,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator { //here we pass 
 	c.server() //Registers the coordinator with net/rpc, so it creates a unix socket path using CoordinatorSock, it starts a HTTP/RPC server listening on that socket
 	return &c  //return a pointer to the coordinator that's been set up, the caller (mrcoordinator.go) will use this coordinator to run the job
 }
-
+func (c *Coordinator) RegisterWorker(args *RegisterArgs, reply)
 func (c *Coordinator) Done() bool { // c is pointer to a coordinator instance, this is called by mrcoordinator.go to check if the entire MapReduce Job is finished
 
 	c.mu.Lock()         // Exclusive access to the coordinator's data. No other goroutine should change while its inside done

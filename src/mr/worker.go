@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"log"
 	"net/rpc"
 	"os"
 	"sort"
@@ -235,18 +234,20 @@ func CallExample() {
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool { //worker connects to the socket and sends RPC calls
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()            //worker learns the socket path, this returns something like: /var/tmp/5840-mr-501
-	c, err := rpc.DialHTTP("unix", sockname) //worker dials the coordinator, this is the exact moment where the worker connects to the UNIX domain socket, establishes an RPC channel and is able to communicate with the coordinator
-	if err != nil {
-		log.Fatal("dialing:", err)
-	}
-	defer c.Close()
 
-	err = c.Call(rpcname, args, reply) // worker sends a rpc request
-	if err == nil {
+	coordinatorAddress := "172.20.10.5:1234"          //network address of the coordinator, connect to IP 172.20.10.5 (the coordinator machine) on port 1234 (where the server() is listening)
+	c, err := rpc.DialHTTP("tcp", coordinatorAddress) //this tries to open a connection to the coordinators RPC server, we use TCP as the protocol and coordinatorAddress → host:port to connect to
+	if err != nil {                                   // on success c is an RPC client object
+		fmt.Println("Coordinator unreachable, assuming failure.")
+		return false //return false from call
+	}
+	defer c.Close() // closes the network connection
+
+	err = c.Call(rpcname, args, reply) // worker sends a rpc request, rpcname is something like: "Coordinator.RequestTask", args = request struct pointer and reply is a pointer to where the coordinator will write the response
+	if err == nil {                    // if there was no errors return true; The caller (worker code) knows: “RPC call worked, reply is filled
 		return true
 	}
 
-	fmt.Println(err)
+	fmt.Println(err) // something went wrong while calling the RPC
 	return false
 }
