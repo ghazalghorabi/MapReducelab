@@ -115,8 +115,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		case ReduceTask:
 			fmt.Println("worker doing reduce task")
-			if err := runReduceTask(reducef, reply.TaskID, reply.NMap, reply.Owners); err != nil { // call doReduceTask with reducef (the users reduce function), reply.TaskID (which reduce task ID to run), reply.NMap (total number of map tasks)
-				fmt.Printf("runReduceTask failed: %v\n", err) // if doReuceTask returns an error, inform user
+			if err := doReduceTask(reducef, reply.TaskID, reply.NMap, reply.Owners); err != nil { // call doReduceTask with reducef (the users reduce function), reply.TaskID (which reduce task ID to run), reply.NMap (total number of map tasks)
+				fmt.Printf("doReduceTask failed: %v\n", err) // if doReuceTask returns an error, inform user
 			}
 
 			doneArgs := ReportTaskArgs{
@@ -184,36 +184,46 @@ func doMapTask(mapf func(string, string) []KeyValue, filename string, taskID int
 	return nil // no errors happend, thus map task completed successfully from the worker's perspective
 }
 
-func runReduceTask(reducef func(string, []string) string, reduceID int, nMap int) error { // runs one reduce task, reducef- the user's reduce function (eg. wc.Reduce), nmap = how many map tasks existed (to know how many mr-i-reduceID files to read)
-	intermediate := []KeyValue{} //create an empty slice to store all key/value pairs that belongs to this reduce task. We’ll fill it by reading mr-<mapID>-<taskID> from every map
+func doReduceTask(reducef func(string, []string) string, reduceID int, nMap int, owners []int) error { // function that runs one reduce task, reducef- the user's reduce function (eg. wc.Reduce), nmap = how many map tasks existed (to know how many mr-i-reduceID files to read)
+	//owners[i] = workerID; that ran the map task and holds file mr-i-*
+	intermediate := []KeyValue{} //create an empty slice to store all key/value pairs that belongs to this reduce task. We’ll fill it by reading mr-i-taskID from every map
 
-	//read intermediate files from all map tasks
-	for i := 0; i < nMap; i++ { //loop i from 0 to nMap-1, each i is a map task ID
-		intermediateFileName := fmt.Sprintf("mr-%d-%d", i, reduceID) // build the filename that this reduce task must read from map i. Example: mr-0-2, mr-1-2, mr-2-2 for taskID = 2
-		file, err := os.Open(intermediateFileName)                   // open that intermediate file for reading
-		if err != nil {                                              // if it fails (file missing, permissions, etc.), return the error immediately
-			return err
+	//read intermediate files from all map tasks, loop over all map tasks
+	for i := 0; i < nMap; i++ { //loop i from 0 to nMap-1, each i is a map task ID, for reduce taskID, we want to read file (mr-i-taskID) from EACH map. Now we must fetch the taskID over the network
+		ownerID := owners[i] //owners[i] tells which worker ran map task i, that workers disk contains the file mr-i-taskID, so this line answers: whoch worker has the file I need for map i
+		if ownerID == -1 {   // means no worker has been recorded for this map task
+			continue //skips this map and goes to the next i
 		}
 
-		decoder := json.NewDecoder(file) //create a JSON decoder that will read KeyValue structs line by line from this file
-		for {                            //infinite loop to read all JSON objects in the file
-			var kv KeyValue                             //allocate a KeyValue to fill
+		args := GetFileArgs{ //create a GetFileArgs struct to send the map worker
+			File: fmt.Sprintf("mr-%d-%d", i, reduceID), //builds the file name eg. map i=2, reduce taskID 1 --> "mr-2-1". So this requests from the map worker the file: mr-i-taskID
+		}
+		fileReply := GetFileReply{} // create an empty GetFileReply; the map worker will put the file bytes into fileReply.Data
+
+		workerAddress := getWorkerAddress(ownerID)                                 //getWorkerAddress(ownerID) asks the coordinator: Whats the Ip port of woker with id=ownerid?; it then returns a string like: 8801 or 10.0.0.7:8801. NOW we know where to send our RPC
+		ok := callWorkerRPC("WorkerRPC.GetFile", workerAddress, &args, &fileReply) //callWorkerRPC connects to that worker (at workerAddress) and calls "WorkerRPC.GetFile". We then pass &args --> File: "mr-i-taskID" and &fileReply--> where the worker puts the file data. If it goes well fileReply.Data will contain the bytes of the file mr-i-taskID
+		if !ok {                                                                   // if ok= false; we couldnt connect to that worker or the RPC failed
+			continue
+		}
+		decoder := json.NewDecoder(bytes.NewReader(fileReply.Data)) // file.reply.Data is a []byte (raw bytes of the file), bytes.NewReader(fileReply.Data) wraps those bytes in something that behaves as a file reader.
+		//json.NewDecoder creates a json decoder that will read KeyValue objects from those bytes
+
+		for { //infinite loop to read all JSON objects in the file
+			var kv KeyValue                             //make a variable to hold one decoded key/value pair
 			if err := decoder.Decode(&kv); err != nil { //try to decode the next JSON value into kv, if it returns an error (usually EOF) break out of the loop
-				break
+				break // fails most often when we reach the end of the data. So we stop the loop because theres no more data to decode
 			}
-			intermediate = append(intermediate, kv) //if decoding worked, append kv to intermediate
+			intermediate = append(intermediate, kv) //if decoding worked, append kv to intermediate list
 		} //after this inner loop, ve have read all key/value pairs generated by map task i for this reducer and added them to intermediate
-		file.Close() // close the file when done reading
-	} // intermediate contains all KeyValues from all map tasks that belong to this reducer (taskID
+	} // intermediate contains all KeyValues from all map tasks that belong to this reducer (taskID). The outer for := 0; i < nMap; i++ loop means we repaet this for every map task
 
 	//sort intermediate key-value pairs by key
 	sort.Slice(intermediate, func(i, j int) bool { //sort.Slice sorts the intermediate slice in-place
-		return intermediate[i].Key < intermediate[j].Key //the comparison function says: element i should come before j if intermediate[i].Key is lexicographically < intermediate[j].Key
+		return intermediate[i].Key < intermediate[j].Key //the comparison function says: element i should come before j if intermediate[i].Key is lexicographically < intermediate[j].Key. So it makes sure keys are sorted lecicographically (A->Z)
 	}) //after this all enteries with the same key are next to each other in the slice whoich makes it easy to group by key
 
-	// create output file mr-out-taskID
-	outputFileName := fmt.Sprintf("mr-out-%d", reduceID) // build the output filename for this reduce task, Example: mr-out-0, mr-out-1, etc
-	outputFile, err := os.Create(outputFileName)         //create the output file
+	outputFileName := fmt.Sprintf("mr-out-%d", reduceID) // create output file mr-out-taskID
+	outputFile, err := os.Create(outputFileName)         // build the output filename for this reduce task, Example: mr-out-0, mr-out-1, etc
 	if err != nil {                                      //if it fails return the error
 		return err
 	}
@@ -221,11 +231,13 @@ func runReduceTask(reducef func(string, []string) string, reduceID int, nMap int
 
 	//apply reduce function to each key and write to output file
 	i := 0                      //start index at the beginning of the intermediate slice
-	for i < len(intermediate) { // loop until we've processed all elements
-		j := i + 1 // j starts at the index after i
-		// Move j forward as long as:
+	for i < len(intermediate) { // loop until we've processed every KeyValue
+		j := i + 1 // use and j to find a GROUP of equeal keys:
 		// 1) j is still inside the slice, and 2) the key at j is the same as the key at i
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			// intermediate[i].Key is the current key
+			// move j forward while they key at j is the same as at i
+			//when this loop stops: all enteries from i to j-1 share the same key
 			j++ // move j to the right
 		}
 
@@ -233,90 +245,24 @@ func runReduceTask(reducef func(string, []string) string, reduceID int, nMap int
 		// We'll collect all their values into a slice
 
 		values := []string{}     // start with an empty list of values
-		for k := i; k < j; k++ { //go through all indices from i up to j-1
+		for k := i; k < j; k++ { //go through all indices from i up to j-1 and collect intermediate[k].Value
 			values = append(values, intermediate[k].Value) // collect the value
 		}
+		//after this loop, values contains all values for intermediate[i].Key.
+		//ex if the key is work and the pairs are: (word, 1), (word, 1), (word, 1)
+		//then values: ["1", "1", "1"]
 
 		// Now 'values' contains all the values for key 'intermediate[i].Key'.
-		// Call the user-defined reduce function with this key and all its values
-		reducedValue := reducef(intermediate[i].Key, values)
+		// Call the user-defined reduce function with this key: intermediate[i].Key and all its values for that key: values []string
+		reducedValue := reducef(intermediate[i].Key, values)                  //ex word count: reducef("word", ["1", "1", "1"]) = "3"
 		fmt.Fprintf(outputFile, "%v %v\n", intermediate[i].Key, reducedValue) // write "key reducedValue" to the final output file
-		// Move i to j to skip over this whole group of equal keys
-		// Next loop will process the next distinct key (if any)
+		// Move i to j to skip over this whole group we just processed
+		// Next loop will process the next key group (if any)
 		i = j
 
 	}
-	return nil
+	return nil //means this reduce task finished succesfully
 }
-
-// TODO:
-func doReduceTask(reducef func(string, []string) string, taskID int, nMap int, owners []int) error {
-	intermediate := []KeyValue{}
-
-	// read intermediate files from all map tasks
-	for i := 0; i < nMap; i++ {
-		ownerID := owners[i]
-		if ownerID == -1 {
-			continue // map task not completed yet (shouldn’t normally happen if coordinator transitions correctly)
-		}
-
-		args := GetFileArgs{
-			File: fmt.Sprintf("mr-%d-%d", i, taskID),
-		}
-		fileReply := GetFileReply{}
-
-		workerAddress := getWorkerAddress(ownerID)
-		ok := callWorkerRPC("WorkerRPC.GetFile", workerAddress, &args, &fileReply)
-		if !ok {
-			// failed to reach owning worker; skip or maybe retry
-			continue
-		}
-
-		dec := json.NewDecoder(bytes.NewReader(fileReply.Data))
-		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
-				break
-			}
-			intermediate = append(intermediate, kv)
-		}
-	}
-
-	// sort by key
-	sort.Slice(intermediate, func(i, j int) bool {
-		return intermediate[i].Key < intermediate[j].Key
-	})
-
-	// create output file mr-out-taskID
-	outputFileName := fmt.Sprintf("mr-out-%d", taskID)
-	outputFile, err := os.Create(outputFileName)
-	if err != nil {
-		return err
-	}
-	defer outputFile.Close()
-
-	// run reducef on each key group and write output
-	i := 0
-	for i < len(intermediate) {
-		j := i + 1
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			j++
-		}
-
-		values := []string{}
-		for k := i; k < j; k++ {
-			values = append(values, intermediate[k].Value)
-		}
-
-		reducedValue := reducef(intermediate[i].Key, values)
-		fmt.Fprintf(outputFile, "%v %v\n", intermediate[i].Key, reducedValue)
-
-		i = j
-	}
-	return nil
-}
-
-//TODO
 
 // example function to show how to make an RPC call to the coordinator.
 //
@@ -366,22 +312,31 @@ func call(rpcname string, args interface{}, reply interface{}) bool { //worker c
 	return false
 }
 
-func callWorkerRPC(rpcname string, workerAddress string, args interface{}, reply interface{}) bool {
-	c, err := rpc.DialHTTP("tcp", workerAddress)
-	if err != nil {
+// callWorkerRPC connects to another worker, calls an RPC method on it and returns true if everything went fine
+func callWorkerRPC(rpcname string, workerAddress string, args interface{}, reply interface{}) bool { //func callWorkerRPC: defines a helper function that can be called from the worker code, call an RPC method one some other worker at this address
+	//rpcname string is the name of the RPC method you want to call on the other worker: "WorkerRPC.GetFile"
+	//workerAddress: the network address of the worker you want to talk to exampleL: ":8001" or "10.0.07:8001"
+	//args interface {} the request object thats been sent for example: &GetFileArgs{File: "mr-0-1"}
+	//reply interface{} the response object that will be filled by the RPC call
+	//bool: the function returns true if the RPC succeded and false if it fails
+	c, err := rpc.DialHTTP("tcp", workerAddress) // Tries to open a TCP connection (network connection) to another worker, c is the RPC client object thats been used to send method calls. err tells if the connection succeded or failed
+	if err != nil {                              // if err is not nil then the connection failed: reasons this could occur: the worker is down, the address is wrong, the network is broken
 		return false
 	}
-	defer c.Close()
-	err = c.Call(rpcname, args, reply)
-	return err == nil
+	defer c.Close() // run c.Close when this function finishes
+
+	err = c.Call(rpcname, args, reply) // c.Call sends the RPC request over the connection: rpcname: eg ("WorkerRPC.GetFile"), args eg.(&GetFileArgs{File:"mr-0-1"}), reply eg. (&GetFileReply{} will be filled by the other workers). This call doesnt run until the remote worker runs the method. sends back a resomse. or an error happens
+	return err == nil                  // err == nil means true if there was no error, false if there was an error, simply return that as the result
+
 }
 
-func getWorkerAddress(workerID int) string {
-	args := WorkerAddressArgs{WorkerID: workerID}
-	reply := WorkerAddressReply{}
-	call("Coordinator.GetWorkerAddress", &args, &reply)
-	if reply.WorkerAddress == "" {
+// getWorkerAddress- asks the coordinator: "Where is worker X?"
+func getWorkerAddress(workerID int) string { //helper function, workerID: the ID of the worker whose address we want, example 0,1,2. Return type string: the address of that worker for ex: 10.0.0.7:8001. So given a worker ID ask the coordinator for its network address
+	args := WorkerAddressArgs{WorkerID: workerID}       // create a WorkerAddressArgs value and set its workerID field to the workerID we are interested in. This is the request sent to the coordinator
+	reply := WorkerAddressReply{}                       //when the coordinator is called it will fill this struct with the workers address
+	call("Coordinator.GetWorkerAddress", &args, &reply) //use the heneral call helper(the one that talks to the cooridnator and not the workers). RPC name: "Coordinator.GetWorkerAddress", &args: send the workerID, &reply: coordinator writes back the address into reply.WorkerAddress. After this line reply.WorkerAddress might be something like: "10.0.0.7:8001"
+	if reply.WorkerAddress == "" {                      // if workerAdress is the empty string
 		fmt.Printf("Worker ID %d address not found\n", workerID)
 	}
-	return reply.WorkerAddress
+	return reply.WorkerAddress //return the address string to the caller
 }

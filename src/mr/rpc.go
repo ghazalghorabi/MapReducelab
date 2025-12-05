@@ -52,7 +52,7 @@ type ReportTaskReply struct{} // this is the coordinators reply to the worker re
 //coordinator -> worker
 //the struct is empty because the worker doesn't need any information back and the coordinator just need to acknowledge that the task was recorded as done
 
-type RegistersArgs struct {
+type RegisterArgs struct {
 	WorkerAdress string //This defines the arguments for an RPC call, this is what the worker send to to the coordinator when it says "Hi i'm a worker, please register me"
 } // This is the TCO address where the worker's own RPC server is listening for ex: ":8001" or "10.0.0.7:9000"
 
